@@ -1,3 +1,4 @@
 # Modelo_educativo
 
-![Uploading ChatGPT Image 16 jun 2025, 10_57_30.png…]()
+
+](https://github.com/datastudioasteroids/Modelo_educativo/blob/main/dise%C3%B1o_front)
