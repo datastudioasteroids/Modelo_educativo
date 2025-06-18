@@ -1,0 +1,251 @@
+---
+title: "ModeloEducación"
+author: "Luciana"
+date: "2025-06-18"
+output: html_document
+---
+
+Cargo librerías
+```{r}
+library(randomForest)
+library(caret)
+library(tidyverse)
+library(ggplot2)
+library(janitor)
+library(readxl)
+library(tidymodels)
+library(tidytext)
+library(word2vec)
+library(devtools)
+library(sf)
+library(rpart)
+library(pdp)
+library(shiny)
+library(openxlsx)
+library(ggridges)
+library(ggthemes)
+library(foreign)
+library(eph)
+library(modelsummary)
+library(gtsummary)
+library(gt)
+library(GGally)
+```
+
+Cargo y limpio los datasets
+```{r}
+
+base_abandono_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/43104_tasa_de_abandono_del_nivel_secundario.xls") %>%
+  clean_names() %>% 
+  rename(tasa_abandono = valor, ano = periodo) %>%
+  mutate(ano = str_sub(ano, 1, 4) %>% as.numeric())
+
+base_repitencia_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/161_tasa-de-repitencia-del-nivel-secundario-por-municipio.-provincia-de-buenos-aires.-anos-2010.xlsx") %>%
+  clean_names() %>% 
+  rename(tasa_repitencia = valor) %>% 
+  mutate(ano = str_sub(ano, 1, 4) %>% as.numeric())
+
+base_sobreedad_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/162_tasa-de-sobreedad-del-nivel-secundario-por-municipio.-provincia-de-buenos-aires.-anos-2010-.xlsx") %>%
+  clean_names() %>% 
+  rename(tasa_sobreedad = valor) %>% 
+  mutate(ano = str_sub(ano, 1, 4) %>% as.numeric())
+
+base_promocion_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/43105_tasa_de_promocion_efectiva_del_nivel_secundario.xls") %>%
+  clean_names() %>% 
+  rename(tasa_promocion = valor, ano = periodo) %>% 
+  mutate(ano = str_sub(ano, 1, 4) %>% as.numeric())
+
+base_reinscripcion_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/43106_tasa_de_reinscripcion_del_nivel_secundario_por_municipio.xls") %>%
+  clean_names() %>% 
+  rename(tasa_reinscripcion = valor, ano = periodo) %>% 
+  mutate(ano = str_sub(ano, 1, 4) %>% as.numeric())
+
+base_matriculas_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/43101_matricula_educativa_estatal_y_privada.xls") %>%
+  clean_names() %>% 
+  rename(tasa_matriculas = valor) %>%
+  pivot_wider(names_from = gestion, values_from = tasa_matriculas, names_prefix = "matricula_") %>%
+  clean_names() %>% 
+  mutate(ano = as.numeric(ano))
+
+base_unidades_educativas_pba <- read_excel("C:/Users/lgoldraij/Downloads/Modelo Educ/PBA/43103_unidades_educativas_de_gestion_estatal_y_privada.xls") %>%
+  clean_names() %>% 
+  rename(tasa_unidades = valor, cod_municipio = t_cod_partido_cod) %>%
+  pivot_wider(names_from = gestion, values_from = tasa_unidades, names_prefix = "unidades_") %>%
+  clean_names() %>% 
+  mutate(ano = as.numeric(ano))
+```
+
+Elaboración de un solo dataframe
+```{r}
+base_educ_pba <- base_abandono_pba %>%
+  left_join(base_promocion_pba, by = c("municipio", "ano")) %>%
+  left_join(base_repitencia_pba, by = c("municipio", "ano")) %>%
+  left_join(base_sobreedad_pba, by = c("municipio", "ano")) %>%
+  left_join(base_reinscripcion_pba, by = c("municipio", "ano")) %>%
+  left_join(base_matriculas_pba, by = c("municipio", "ano")) %>%
+  left_join(base_unidades_educativas_pba, by = c("municipio", "ano"))
+```
+
+Elimino columnas repetidas
+```{r}
+base_educ_pba <- base_educ_pba %>%
+  select(-matches("^cod_municipio\\."))
+```
+
+
+Elimino valores negativos en la tasa de abandono
+```{r}
+base_educ_pba <- base_educ_pba %>%
+  mutate(tasa_abandono = ifelse(tasa_abandono < 0, 0, tasa_abandono))
+```
+
+Análisis exploratorio
+```{r}
+summary(base_educ_pba$tasa_abandono)
+hist(base_educ_pba$tasa_abandono)
+```
+
+```{r}
+base_educ_pba %>%
+  select(where(is.numeric)) %>%
+  ggpairs()
+```
+
+División en conjunto de entrenamiento y prueba
+```{r}
+set.seed(123)
+split <- initial_split(base_educ_pba, prop = 0.8)
+train_data <- training(split)
+test_data  <- testing(split)
+```
+
+Receta
+```{r}
+rec <- recipe(tasa_abandono ~ ., data = train_data) %>%
+  update_role(municipio, new_role = "id") %>%
+  update_role(ano, new_role = "id") %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors())
+```
+
+Especificación del modelo
+```{r}
+rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = 500,
+  min_n = tune()
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+```
+
+workflow
+```{r}
+wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(rf_spec)
+```
+
+grilla hiperparámetros
+```{r}
+grid <- grid_regular(
+  mtry(range = c(1, 5)),
+  min_n(range = c(2, 10)),
+  levels = 5
+)
+```
+
+validación cruzada
+```{r}
+set.seed(234)
+folds <- vfold_cv(train_data, v = 5)
+```
+
+tuneo
+```{r}
+tune_res <- tune_grid(
+  wf,
+  resamples = folds,
+  grid = grid,
+  metrics = metric_set(rmse, rsq)
+)
+```
+
+```{r}
+best_params <- tune::select_best(tune_res, metric = "rmse")
+```
+
+```{r}
+# Finalización del workflow
+final_wf <- finalize_workflow(wf, best_params)
+{r}
+Copy
+Edit
+# Entrenamiento del modelo con todo el train
+final_fit <- fit(final_wf, data = train_data)
+{r}
+Copy
+Edit
+# Predicción y evaluación en test
+predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+rmse(predictions, truth = tasa_abandono, estimate = .pred)
+rsq(predictions, truth = tasa_abandono, estimate = .pred)
+```
+
+Gráfico de predicciones vs. valores reales
+```{r}
+ggplot(predictions, aes(x = tasa_abandono, y = .pred)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Predicción vs. Valor Real de Tasa de Abandono",
+    x = "Valor real",
+    y = "Predicción del modelo"
+  ) +
+  theme_minimal()
+```
+
+municipios con mas abandono en 2020
+```{r}
+top_municipios_2020 <- base_educ_filtrado %>%
+  filter(ano == 2020) %>%
+  arrange(desc(tasa_abandono)) %>%
+  slice_head(n = 5) %>%
+  pull(municipio)
+
+base_educ_filtrado %>%
+  filter(municipio %in% top_municipios_2020) %>%
+  ggplot(aes(x = ano, y = tasa_abandono, color = municipio)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de la Tasa de Abandono (2019–2022)",
+    subtitle = "Top 5 municipios con mayor abandono en 2020",
+    x = "Año",
+    y = "Tasa de abandono"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+distribución de la tasa de abandono en los municipios para cada año entre 2019 y 2022
+```{r}
+base_educ_filtrado <- base_educ_pba %>%
+  filter(ano >= 2019 & ano <= 2022)
+
+ggplot(base_educ_filtrado, aes(x = tasa_abandono)) +
+  geom_histogram(binwidth = 1, fill = "steelblue") +
+  facet_wrap(~ ano) +
+  theme_minimal()
+
+```
+
+save model
+```{r}
+
+saveRDS(final_fit, "modelo_rf_final.rds")
+
+```
+
